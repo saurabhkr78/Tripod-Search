@@ -38,28 +38,6 @@ The primary achievement of this project is the creation of a highly efficient, r
 
 ---
 
-## In-Depth Code Explanation
-
-This section provides a detailed breakdown of the C++ code in `main.cpp`.
-
-### **Header Includes**
-```cpp
-#include <iostream>       // For standard input/output operations (like std::cout).
-#include <string>         // For using the std::string class.
-#include <vector>         // For using the std::vector container (dynamic array).
-#include <unordered_map>  // For using std::unordered_map, a hash table for fast key-value lookups.
-#include <memory>         // For smart pointers like std::unique_ptr.
-#include <mutex>          // For basic mutex functionalities.
-#include <shared_mutex>   // For std::shared_mutex, allowing multiple readers or one writer (C++17).
-#include <chrono>         // For high-precision time measurement (benchmarking).
-#include <thread>         // For creating and managing threads (concurrency).
-#include <cstdlib>        // For general utilities, including rand() for random number generation.
-#include <ctime>          // For seeding the random number generator with time().
-```
-
-### **Class `Trie`**
-This class is the core of the project, defining the entire Trie data structure and its functionality.
-
 #### **`struct TrieNode`**
 This struct defines what a single node in the Trie looks like.
 ```cpp
