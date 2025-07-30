@@ -4,10 +4,12 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <chrono>
 #include <thread>
 #include <cstdlib>
 #include <ctime>
+
 
 /**
  * @class Trie
@@ -27,12 +29,12 @@ private:
      * end of a word. A mutex is included for thread-safe modifications.
      */
     struct TrieNode {
-        /// @brief A map from a character to a child node, managed by a smart pointer.
-        std::unordered_map<char, std::shared_ptr<TrieNode>> children;
+        /// @brief A map from a character to a child node, managed by a unique pointer.
+        std::unordered_map<char, std::unique_ptr<TrieNode>> children;
         /// @brief True if this node represents the end of a complete word.
         bool isEndOfWord;
-        /// @brief A mutex to protect this node from concurrent access.
-        std::mutex mtx;
+        /// @brief A shared mutex to protect this node from concurrent access (many readers, one writer).
+        mutable std::shared_mutex mtx;
 
         /**
          * @brief Construct a new Trie Node object.
@@ -40,8 +42,8 @@ private:
         TrieNode() : isEndOfWord(false) {}
     };
 
-    /// @brief The root node of the Trie, managed by a smart pointer.
-    std::shared_ptr<TrieNode> root;
+    /// @brief The root node of the Trie, managed by a unique pointer.
+    std::unique_ptr<TrieNode> root;
 
 public:
     /**
@@ -49,7 +51,7 @@ public:
      * Initializes the root of the Trie.
      */
     Trie() {
-        root = std::make_shared<TrieNode>();
+        root = std::make_unique<TrieNode>();
     }
 
     /**
@@ -58,15 +60,15 @@ public:
      * @param word The word to insert.
      */
     void insert(const std::string& word) {
-        std::shared_ptr<TrieNode> current = root;
+        TrieNode* current = root.get();
         for (char ch : word) {
-            std::lock_guard<std::mutex> lock(current->mtx);
+            std::unique_lock<std::shared_mutex> lock(current->mtx);
             if (current->children.find(ch) == current->children.end()) {
-                // A new node is created and managed by a shared_ptr.
-                current->children[ch] = std::make_shared<TrieNode>();
+                current->children[ch] = std::make_unique<TrieNode>();
             }
-            current = current->children[ch];
+            current = current->children[ch].get();
         }
+        std::unique_lock<std::shared_mutex> lock(current->mtx);
         current->isEndOfWord = true;
     }
 
@@ -77,18 +79,98 @@ public:
      * @return True if the prefix exists, false otherwise.
      */
     bool search(const std::string& prefix) {
-        std::shared_ptr<TrieNode> current = root;
+        TrieNode* current = root.get();
         for (char ch : prefix) {
-            // Reading also needs a lock in a concurrent read/write scenario,
-            // but for this benchmark, we can assume searches happen after insertions.
-            // For a more robust real-world system, a shared_mutex might be better.
-            std::lock_guard<std::mutex> lock(current->mtx);
+            std::shared_lock<std::shared_mutex> lock(current->mtx);
             if (current->children.find(ch) == current->children.end()) {
                 return false;
             }
-            current = current->children[ch];
+            current = current->children[ch].get();
         }
-        return true;
+        std::shared_lock<std::shared_mutex> lock(current->mtx);
+        return current->isEndOfWord;
+    }
+
+    /**
+     * @brief Removes a word from the Trie.
+     * This operation is thread-safe.
+     * @param word The word to remove.
+     */
+    void remove(const std::string& word) {
+        remove_helper(root.get(), word, 0);
+    }
+
+    /**
+     * @brief Returns all words in the Trie with a given prefix.
+     * @param prefix The prefix to search for.
+     * @return A vector of strings containing all words with the given prefix.
+     */
+    std::vector<std::string> words_with_prefix(const std::string& prefix) {
+        TrieNode* current = root.get();
+        for (char ch : prefix) {
+            std::shared_lock<std::shared_mutex> lock(current->mtx);
+            if (current->children.find(ch) == current->children.end()) {
+                return {};
+            }
+            current = current->children[ch].get();
+        }
+
+        std::vector<std::string> results;
+        collect_words(current, prefix, results);
+        return results;
+    }
+
+private:
+    /**
+     * @brief Helper function to recursively collect words from a given node.
+     * @param node The starting node.
+     * @param current_prefix The prefix accumulated so far.
+     * @param results The vector to store the found words.
+     */
+    void collect_words(TrieNode* node, std::string current_prefix, std::vector<std::string>& results) {
+        std::shared_lock<std::shared_mutex> lock(node->mtx);
+        if (node->isEndOfWord) {
+            results.push_back(current_prefix);
+        }
+
+        for (const auto& pair : node->children) {
+            collect_words(pair.second.get(), current_prefix + pair.first, results);
+        }
+    }
+
+    /**
+     * @brief Helper function to recursively remove a word from the Trie.
+     * @param current The current node.
+     * @param word The word to remove.
+     * @param depth The current depth in the Trie.
+     * @return True if the current node can be deleted, false otherwise.
+     */
+    bool remove_helper(TrieNode* current, const std::string& word, int depth) {
+        if (!current) {
+            return false;
+        }
+
+        if (depth == word.length()) {
+            std::unique_lock<std::shared_mutex> lock(current->mtx);
+            if (!current->isEndOfWord) {
+                return false; // Word doesn't exist
+            }
+            current->isEndOfWord = false;
+            return current->children.empty();
+        }
+
+        char ch = word[depth];
+        std::unique_lock<std::shared_mutex> lock(current->mtx);
+        if (current->children.find(ch) == current->children.end()) {
+            return false; // Word doesn't exist
+        }
+
+        if (remove_helper(current->children[ch].get(), word, depth + 1)) {
+            current->children.erase(ch);
+            return !current->isEndOfWord && current->children.empty();
+        }
+
+        return false;
     }
 };
 
@@ -224,5 +306,26 @@ int main() {
     Trie trie;
     Benchmark benchmark(trie, 100000, 5, 4);
     benchmark.run();
+
+    // Demonstrate new features
+    std::cout << "\n--- Demonstrating New Features ---" << std::endl;
+    trie.insert("apple");
+    trie.insert("app");
+    trie.insert("application");
+    trie.insert("apricot");
+
+    std::cout << "Words with prefix 'app':" << std::endl;
+    for (const auto& word : trie.words_with_prefix("app")) {
+        std::cout << "  - " << word << std::endl;
+    }
+
+    std::cout << "\nRemoving 'apple'..." << std::endl;
+    trie.remove("apple");
+
+    std::cout << "Words with prefix 'app' after removal:" << std::endl;
+    for (const auto& word : trie.words_with_prefix("app")) {
+        std::cout << "  - " << word << std::endl;
+    }
+
     return 0;
 }
